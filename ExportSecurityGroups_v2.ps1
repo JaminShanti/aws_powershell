@@ -1,66 +1,71 @@
-##############################################################################
-##
-## dump Iam Policies
-## Created by Jamin Shanti
-## Date : 3/9/2015
-## Version : 1.0
-## Update: adding url check 
-## reference : http://techdebug.com/blog/2014/08/05/powershell-aws-and-iam-policy-retrieval/ 
-## copies the group and role security locally for review.
-##############################################################################
+<#
+.SYNOPSIS
+    Dumps IAM Policies and Security Groups.
+.DESCRIPTION
+    Copies the group and role security locally for review.
+    Reference: http://techdebug.com/blog/2014/08/05/powershell-aws-and-iam-policy-retrieval/
+.NOTES
+    Created by Jamin Shanti
+    Date: 3/9/2015
+    Version: 1.0
+#>
+[CmdletBinding()]
+Param()
 
-#===============================================================================================
-# Script to output all the IAM polcies
-#===============================================================================================
 $ErrorActionPreference = "Stop"
 
 Import-Module AWSPowerShell
 # For URL Decode of Policy document
-[System.Reflection.Assembly]::LoadWithPartialName("System.web") | out-null
-#Form Output for script
-[System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms") | out-null
+Add-Type -AssemblyName System.Web
+# Form Output for script
+Add-Type -AssemblyName System.Windows.Forms
 
-#Current Path
+# Current Path
 $path = (Get-Item -Path ".\" -Verbose).FullName
 
-#Notify User
+# Notify User
 $caption = "Warning!"
-$message = "This Script will override all current policies in:`n$path\Groups`nand`n$path\Roles`n with current AWS Policies! Do you want to proceed"
-$yesNoButtons = 4
+$message = "This Script will override all current policies in:`n$path\Groups`nand`n$path\Roles`n with current AWS Policies! Do you want to proceed?"
+$yesNoButtons = [System.Windows.Forms.MessageBoxButtons]::YesNo
 
-if ([System.Windows.Forms.MessageBox]::Show($message, $caption, $yesNoButtons) -eq "NO") {
-    Write "Script Terminated"
+if ([System.Windows.Forms.MessageBox]::Show($message, $caption, $yesNoButtons) -eq "No") {
+    Write-Host "Script Terminated" -ForegroundColor Red
     Break
-}
-else {
-    #delete existing policies stored locally
-    if (Test-Path -LiteralPath $path\SecurityGroups -PathType Container) {
-        Remove-Item -Recurse -Force $path\SecurityGroups
+} else {
+    # Delete existing policies stored locally
+    if (Test-Path -LiteralPath "$path\SecurityGroups" -PathType Container) {
+        Remove-Item -Recurse -Force "$path\SecurityGroups"
     }
+
     $groups = Get-EC2SecurityGroup
-    foreach ($this in $groups) {
-        Write-Host  "SecurityGroup: $($this.GroupName)"
-        Write-Host "Creating Dir... "
-        #create new dir
-        New-Item -ItemType directory -Path $path\SecurityGroups\$($this.VpcId)\$($this.GroupName) | out-null
-         #Get policies for each group and role and write out to directories
-        Write-Host "Saving Description for... "
-        $b  = ($groups | where GroupName -eq $($this.GroupName)) | select Description , GroupId , GroupName | Format-List
-        $b  > $path\SecurityGroups\$($this.VpcId)\$($this.GroupName)\$($this.GroupName)_Description.txt
-        Write-Host "Saving IpPermissionsIngress for... "
-        $c  =  (Get-EC2SecurityGroup | where GroupName -eq $($this.GroupName)).IpPermissions 
-        # if IPranges are not used, convert groupID to groupName.
-        if ($c.IpRanges.Count -eq 0) {
-            $c = (Get-EC2SecurityGroup | where GroupName -eq $($this.GroupName)).IpPermissions  | select FromPort, IpProtocol , IpRanges , ToPort, @{Name="UserIdGroupPairs";Expression={(Get-EC2SecurityGroup -GroupId $_.UserIdGroupPairs.GroupId).GroupName}}
-            }
-        else{
-            $c  = (Get-EC2SecurityGroup | where GroupName -eq $($this.GroupName)).IpPermissions  | select FromPort, IpProtocol , IpRanges , ToPort, @{Name="UserIdGroupPairs";Expression={$_.UserIdGroupPairs.GroupId}}
+
+    foreach ($group in $groups) {
+        Write-Host "SecurityGroup: $($group.GroupName)" -ForegroundColor Cyan
+        Write-Host "Creating Dir... " -ForegroundColor Cyan
+
+        # Create new dir
+        New-Item -ItemType Directory -Path "$path\SecurityGroups\$($group.VpcId)\$($group.GroupName)" | Out-Null
+
+        # Get policies for each group and role and write out to directories
+        Write-Host "Saving Description for... " -ForegroundColor Cyan
+        $group | Select-Object Description, GroupId, GroupName | Format-List | Out-File "$path\SecurityGroups\$($group.VpcId)\$($group.GroupName)\$($group.GroupName)_Description.txt"
+
+        Write-Host "Saving IpPermissionsIngress for... " -ForegroundColor Cyan
+        $ingress = $group.IpPermissions
+
+        # If IpRanges are not used, convert GroupId to GroupName.
+        if ($ingress.IpRanges.Count -eq 0) {
+            $ingress = $group.IpPermissions | Select-Object FromPort, IpProtocol, IpRanges, ToPort, @{Name="UserIdGroupPairs"; Expression={(Get-EC2SecurityGroup -GroupId $_.UserIdGroupPairs.GroupId).GroupName}}
+        } else {
+            $ingress = $group.IpPermissions | Select-Object FromPort, IpProtocol, IpRanges, ToPort, @{Name="UserIdGroupPairs"; Expression={$_.UserIdGroupPairs.GroupId}}
         }
-        $c | ConvertTo-Json > $path\SecurityGroups\$($this.VpcId)\$($this.GroupName)\IpPermissionsIngress.json
-        Write-Host  "Saving IpPermissionsEgress for..."
-        #$d =  (Get-EC2SecurityGroup | where GroupName -eq $($this.GroupName)).IpPermissionsEgress | select FromPort, IpProtocol , IpRanges , ToPort, @{Name="UserIdGroupPairs";Expression={(Get-EC2SecurityGroup -GroupId $_.UserIdGroupPairs.GroupId).GroupName}}
-        $d = ($groups | where GroupName -eq $($this.GroupName)).IpPermissionsEgress | select FromPort, IpProtocol , IpRanges , ToPort, @{Name="UserIdGroupPairs";Expression={$_.UserIdGroupPairs.GroupId}}
-        $d | ConvertTo-Json > $path\SecurityGroups\$($this.VpcId)\$($this.GroupName)\IpPermissionsEgress.json
+
+        $ingress | ConvertTo-Json | Out-File "$path\SecurityGroups\$($group.VpcId)\$($group.GroupName)\IpPermissionsIngress.json"
+
+        Write-Host "Saving IpPermissionsEgress for..." -ForegroundColor Cyan
+        $egress = $group.IpPermissionsEgress | Select-Object FromPort, IpProtocol, IpRanges, ToPort, @{Name="UserIdGroupPairs"; Expression={$_.UserIdGroupPairs.GroupId}}
+        $egress | ConvertTo-Json | Out-File "$path\SecurityGroups\$($group.VpcId)\$($group.GroupName)\IpPermissionsEgress.json"
     }
-    Write-Host "Script Finished"
+
+    Write-Host "Script Finished" -ForegroundColor Green
 }

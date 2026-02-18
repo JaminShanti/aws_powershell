@@ -1,94 +1,113 @@
+<#
+.SYNOPSIS
+    Recovers a MongoDB Node for DR.
+.DESCRIPTION
+    Creates the Elastic Load Balancer, MongoDBNode Instance with data snapshot.
+    Resources Generated: Elastic Load Balancer, MongoDBNode Instance with data snapshot.
+.NOTES
+    Created by Jamin Shanti
+    Date: 4/22/2015
+    Version: 1.0
+#>
+[CmdletBinding()]
 Param(
-  [parameter(Mandatory=$true)]
-  [string]$newNodeName ,
-  [parameter(Mandatory=$false)]
-  [string]$Region = "us-west-2" ,
-  [parameter(Mandatory=$false)]
-  [string]$zonename = "online.staging-dr." ,
-  [parameter(Mandatory=$true)]
-  [string]$vpcid ,
-  [parameter(Mandatory=$false)]
-  [string]$ami = "ami-xxxxxxxx" ,
-  [parameter(Mandatory=$false)]
-  [string]$datasnapshot = "snap-xxxxxxxx"
+    [Parameter(Mandatory=$true)]
+    [string]$NewNodeName,
+    [Parameter(Mandatory=$false)]
+    [string]$Region = "us-west-2",
+    [Parameter(Mandatory=$false)]
+    [string]$ZoneName = "online.staging-dr.",
+    [Parameter(Mandatory=$true)]
+    [string]$VpcId,
+    [Parameter(Mandatory=$false)]
+    [string]$Ami = "ami-xxxxxxxx",
+    [Parameter(Mandatory=$false)]
+    [string]$DataSnapshot = "snap-xxxxxxxx"
 )
 
-##############################################################################
-##
-## DR_recover_mongoDB
-## Created by Jamin Shanti
-## Date : 422/2015
-## Version : 1.0
-## Creates the elasticSearchNode Cluster
-## Resources Generated : Elastic Load Balancer, MongoDBNode Instance with data snapshot
-##############################################################################
-
-
-#$newNodeName = "s-mongo-west-1a_DR"
 $ErrorActionPreference = "Stop"
+
+function Write-Log {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$Message,
+        [string]$Level = "Info"
+    )
+
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $formattedMessage = "[$timestamp] [$Level] $Message"
+
+    switch ($Level) {
+        "Info" { Write-Host $formattedMessage -ForegroundColor Cyan }
+        "Success" { Write-Host $formattedMessage -ForegroundColor Green }
+        "Warning" { Write-Host $formattedMessage -ForegroundColor Yellow }
+        "Error" { Write-Host $formattedMessage -ForegroundColor Red }
+        Default { Write-Host $formattedMessage }
+    }
+}
+
 Set-AWSCredentials -ProfileName online-staging_jshanti
 Set-DefaultAWSRegion -Region $Region
 
-$currentSubnetNumber = Get-Random -minimum 0 -maximum 3
+$currentSubnetNumber = Get-Random -Minimum 0 -Maximum 3
 
-$mongoDBsearchSubnets = (Get-EC2Subnet | where {$_.VpcId -eq $vpcid �and $_.Tag.Key -eq  "Name" -and $_.Tag.Value -match "Database"}).SubnetId
+$mongoDBsearchSubnets = (Get-EC2Subnet | Where-Object { $_.VpcId -eq $VpcId -and $_.Tag.Key -eq "Name" -and $_.Tag.Value -match "Database" }).SubnetId
 
-echo "selecting ami ..."
+Write-Log -Message "Selecting AMI..."
+$image = Get-EC2Image -ImageId $Ami
+$BlockDeviceMapping_includingSnapshot = $image.BlockDeviceMappings
 
-Get-EC2Image -ImageId $ami
-$BlockDeviceMapping_includingSnapshot = (Get-EC2Image -ImageId $ami).BlockDeviceMappings
+Write-Log -Message "Adding data snapshot...$DataSnapshot"
+$BlockDeviceMapping_includingSnapshot[1].Ebs.SnapshotId = $DataSnapshot
 
-echo "adding data snapshot...$datasnapshot"
+# Fetch the Security Group ID
+$mongoSecurityGroupID = (Get-EC2SecurityGroup | Where-Object { $_.GroupName -eq "Mongo" }).GroupId
 
-$BlockDeviceMapping_includingSnapshot[1].Ebs.SnapshotId = $datasnapshot
+$NewInstanceResponse = New-EC2Instance -ImageId $Ami -MinCount 1 -MaxCount 1 -Region $Region -KeyName West-Staging-VPC -SecurityGroupId $mongoSecurityGroupID -InstanceType m3.large `
+    -SubnetId $mongoDBsearchSubnets[$currentSubnetNumber] -InstanceProfile_Name database -BlockDeviceMapping $BlockDeviceMapping_includingSnapshot -EncodeUserData `
+    -UserDataFile "$($pwd)\mongodb_startup_userdata"
 
-#Feach the Security Group ID
-$mongoSecurityGroupID = (Get-EC2SecurityGroup | where GroupName -eq "Mongo").GroupID
-
-$NewInstanceResponse =  New-EC2Instance -ImageId $ami -MinCount 1 -MaxCount 1 -Region $Region -KeyName West-Staging-VPC -SecurityGroupID $mongoSecurityGroupID -InstanceType m3.large `
-        -SubnetId $mongoDBsearchSubnets[$currentSubnetNumber] -InstanceProfile_Name  database -BlockDeviceMapping $BlockDeviceMapping_includingSnapshot -EncodeUserData  `
-        -UserDataFile "$($pwd)\mongodb_startup_userdata"
 $filter_reservation = New-Object Amazon.EC2.Model.Filter -Property @{Name = "reservation-id"; Values = $NewInstanceResponse.ReservationId}
 $newlyCreatedEc2Instance = (Get-EC2Instance -Filter $filter_reservation).Instances
-While ($newlyCreatedEc2Instance.BlockDeviceMappings.Count -eq 0)
-{
-  $newlyCreatedEc2Instance = (Get-EC2Instance -Filter $filter_reservation).Instances
-  Start-Sleep -Seconds 5
+
+while ($newlyCreatedEc2Instance.BlockDeviceMappings.Count -eq 0) {
+    $newlyCreatedEc2Instance = (Get-EC2Instance -Filter $filter_reservation).Instances
+    Start-Sleep -Seconds 5
 }
-echo "Newly Created Instance:"
-echo $newlyCreatedEc2Instance | select InstanceId, InstanceType, LaunchTime, PrivateIpAddress, VpcId 
 
-echo "adding Ec2Tags..."
-New-EC2Tag -Resource $newlyCreatedEc2Instance.InstanceId -Tag @( @{ Key="Name"; Value=$newNodeName } )
-New-EC2Tag -Resource $newlyCreatedEc2Instance.BlockDeviceMappings[0].Ebs.VolumeId -Tag @( @{ Key="Name"; Value="$($newNodeName) Root volume" } )
-New-EC2Tag -Resource $newlyCreatedEc2Instance.BlockDeviceMappings[1].Ebs.VolumeId -Tag @( @{ Key="Name"; Value="$($newNodeName) Data volume" } )
-New-EC2Tag -Resource $newlyCreatedEc2Instance.BlockDeviceMappings[2].Ebs.VolumeId -Tag @( @{ Key="Name"; Value="$($newNodeName) volume 1" } )
-New-EC2Tag -Resource $newlyCreatedEc2Instance.BlockDeviceMappings[3].Ebs.VolumeId -Tag @( @{ Key="Name"; Value="$($newNodeName) volume 2" } )
+Write-Log -Message "Newly Created Instance:" -Level "Success"
+$newlyCreatedEc2Instance | Select-Object InstanceId, InstanceType, LaunchTime, PrivateIpAddress, VpcId
 
- 
+Write-Log -Message "Adding Ec2Tags..."
+New-EC2Tag -Resource $newlyCreatedEc2Instance.InstanceId -Tag @{ Key="Name"; Value=$NewNodeName }
+New-EC2Tag -Resource $newlyCreatedEc2Instance.BlockDeviceMappings[0].Ebs.VolumeId -Tag @{ Key="Name"; Value="$($NewNodeName) Root volume" }
+New-EC2Tag -Resource $newlyCreatedEc2Instance.BlockDeviceMappings[1].Ebs.VolumeId -Tag @{ Key="Name"; Value="$($NewNodeName) Data volume" }
+New-EC2Tag -Resource $newlyCreatedEc2Instance.BlockDeviceMappings[2].Ebs.VolumeId -Tag @{ Key="Name"; Value="$($NewNodeName) volume 1" }
+New-EC2Tag -Resource $newlyCreatedEc2Instance.BlockDeviceMappings[3].Ebs.VolumeId -Tag @{ Key="Name"; Value="$($NewNodeName) volume 2" }
 
+Write-Log -Message "Registering ELB - Mongo..."
 
-echo "registering ELB - Mongo..."
-
-#  use subnets for VPCs  availablity zones for ec2-classic
-
-if (-not((Get-ELBloadbalancer).LoadBalancerName -match "elb-MongoDB" ))
-{
-echo "creating ELB - elb-MongoDB..."
-#Feach the Security Group ID
-$ELBMongoDBSecurityGroupID = (Get-EC2SecurityGroup | where GroupName -eq "ELBMongoDB").GroupID
-$ELBmongoDB = New-ELBLoadBalancer -LoadBalancerName elb-MongoDB -SecurityGroup $ELBMongoDBSecurityGroupID -Subnets $mongoDBsearchSubnets -Scheme internal -Listener @{ LoadBalancerPort=27017;InstancePort=27017;Protocol="TCP";InstanceProtocol="TCP" }
-Set-ELBHealthCheck -LoadBalancerName elb-MongoDB   -HealthCheck_Target "TCP:27017" -HealthCheck_Timeout 5 -HealthCheck_Interval 30    -HealthCheck_HealthyThreshold 2 -HealthCheck_UnhealthyThreshold 2 
+# Use subnets for VPCs, availability zones for EC2-Classic
+if (-not ((Get-ELBLoadBalancer).LoadBalancerName -match "elb-MongoDB")) {
+    Write-Log -Message "Creating ELB - elb-MongoDB..."
+    # Fetch the Security Group ID
+    $ELBMongoDBSecurityGroupID = (Get-EC2SecurityGroup | Where-Object { $_.GroupName -eq "ELBMongoDB" }).GroupId
+    $ELBmongoDB = New-ELBLoadBalancer -LoadBalancerName elb-MongoDB -SecurityGroup $ELBMongoDBSecurityGroupID -Subnets $mongoDBsearchSubnets -Scheme internal -Listener @{ LoadBalancerPort=27017; InstancePort=27017; Protocol="TCP"; InstanceProtocol="TCP" }
+    Set-ELBHealthCheck -LoadBalancerName elb-MongoDB -HealthCheck_Target "TCP:27017" -HealthCheck_Timeout 5 -HealthCheck_Interval 30 -HealthCheck_HealthyThreshold 2 -HealthCheck_UnhealthyThreshold 2
 }
-echo "Associate Instances with Load Balancer..."
-Register-ELBInstanceWithLoadBalancer -LoadBalancerName �elb-MongoDB� -Instances @($newlyCreatedEc2Instance.InstanceId)
 
-echo "Running aws_ec2_register_route53.ps1 $newNodeName $(($newlyCreatedEc2Instance).PrivateIpAddress)  online.staging. Type = A"
-.\aws_ec2_register_route53.ps1  -newNodeName $newNodeName -newNodeValue $newlyCreatedEc2Instance.PrivateIpAddress -zoneName $zonename -targetType A
+Write-Log -Message "Associate Instances with Load Balancer..."
+Register-ELBInstanceWithLoadBalancer -LoadBalancerName "elb-MongoDB" -Instances @($newlyCreatedEc2Instance.InstanceId)
+
+Write-Log -Message "Running aws_ec2_register_route53.ps1 $NewNodeName $(($newlyCreatedEc2Instance).PrivateIpAddress) online.staging. Type = A"
+.\aws_ec2_register_route53.ps1 -newNodeName $NewNodeName -newNodeValue $newlyCreatedEc2Instance.PrivateIpAddress -zoneName $ZoneName -targetType A
+
 $splitIP = $newlyCreatedEc2Instance.PrivateIpAddress.Split('.')
 [array]::Reverse($splitIP)
 $reversezoneName = $splitIP[1,2,3] -join '.'
 $reversezoneNameFullName = $reversezoneName + ".in-addr.arpa."
-echo "Adding Reverse DNS $reversezoneNameFullName..."
-.\aws_ec2_register_route53.ps1  -newNodeName $splitIP[0] -newNodeValue "$newNodeName.$zonename" -zonename $reversezoneNameFullName -targetType PTR
-echo "provision completed $newNodeName"
+
+Write-Log -Message "Adding Reverse DNS $reversezoneNameFullName..."
+.\aws_ec2_register_route53.ps1 -newNodeName $splitIP[0] -newNodeValue "$NewNodeName.$ZoneName" -zonename $reversezoneNameFullName -targetType PTR
+
+Write-Log -Message "Provision completed $NewNodeName" -Level "Success"
